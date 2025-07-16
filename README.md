@@ -30,3 +30,14 @@ Use Cases
 - Real-time trade signals & alerts
 - Personal trading assistant
 - Strategy backtesting & improvement
+
+Checklist to Start Bot with Live Market
+
+- Ensure instruments.csv is up to date (download if needed).
+- Run generate_token.py to refresh access token if expired.
+- Start scalping_candle_signal.py and monitor logs.
+- Watch for:
+- Signal generation every 3 mins
+- Telegram entry/exit alerts
+- Updates to trade_log.csv
+- TSL movement, if price goes in favor

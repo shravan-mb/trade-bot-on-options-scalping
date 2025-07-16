@@ -1,182 +1,218 @@
-from kiteconnect import KiteConnect, KiteTicker
-import pandas as pd
-import datetime as dt
-import requests
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
+# scalping_candle_signal.py
 
-# ======================= CONFIGURATION ========================
+import time
+import pandas as pd
+from kiteconnect import KiteConnect, KiteTicker
+from datetime import datetime, timedelta
+from option_token_utils import get_option_details, get_nearest_expiry
+from telegram_send import send_telegram_alert
+
+# Time control
+from datetime import datetime, time as dtime
+
+last_trade_time = None
+cooldown_minutes = 5
+
+TRADING_START = dtime(9, 20)
+TRADING_END = dtime(15, 0)
+
+# Zerodha credentials
 api_key = "8u2wqiw1fiqfeo00"
 access_token = "MqLW7DjAgQp45IsC7xF9z22uWNuFY7N4"
 kite = KiteConnect(api_key=api_key)
 kite.set_access_token(access_token)
 
-BOT_TOKEN = "8029709691:AAHMBEEf93Thr-9GiqOXNuomHhOeSMM1iHo"
-CHAT_ID = "6138982558"
-
-# NIFTY spot token + Option strike token
+# Constants
 INDEX_TOKEN = 256265  # NIFTY 50
-OPTION_TOKEN = 12105474  # Replace with your actual strike token
-tokens = [INDEX_TOKEN, OPTION_TOKEN]
+tokens = [INDEX_TOKEN]
 
-TRADE_SYMBOL = "NIFTY2571725200CE"  # Replace with your actual tradingsymbol
-QTY = 50  # 1 Lot NIFTY
-RR_RATIO = 3  # Risk-Reward 1:3
-STOPLOSS_PCT = 0.3  # 30% stoploss
-# =============================================================
+# Storage for live ticks
+tick_data = []
+option_ltp = None
+current_signal = None
+active_trade = False
+entry_price = 0
+stoploss = 0
+target = 0
 
-kws = KiteTicker(api_key, access_token)
-ohlc_data = {}
-open_trade = None  # Track active trade details
+# Signal config
+SL_POINTS = 5
+TARGET_POINTS = 10
 
-def send_telegram_alert(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
-    try:
-        r = requests.post(url, data=payload)
-        if r.status_code == 200:
-            print("\U0001F4E9 Telegram alert sent.")
-        else:
-            print("⚠️ Telegram Error:", r.text)
-    except Exception as e:
-        print("🚨 Telegram Error:", e)
+TRAIL_TRIGGER = 5     # Profit trigger to start trailing (points)
+TRAIL_STEP = 2          # Move SL every 5 points gained
 
-def place_option_trade(signal):
-    global open_trade
-    try:
-        print(f"🛒 Placing order for {TRADE_SYMBOL}...")
-        ltp_data = kite.ltp(f"NFO:{TRADE_SYMBOL}")
-        ltp = ltp_data[f"NFO:{TRADE_SYMBOL}"]['last_price']
-        sl = round(ltp * (1 - STOPLOSS_PCT), 1)
-        target = round(ltp + (ltp - sl) * RR_RATIO, 1)
+# Telegram & expiry
+# expiry = "25JUL"
 
-        order = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=TRADE_SYMBOL,
-            transaction_type=kite.TRANSACTION_TYPE_BUY,
-            quantity=QTY,
-            product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_MARKET
-        )
+# NEW — get latest expiry string from helper
+expiry = get_nearest_expiry()
+chat_id = "6138982558"
 
-        open_trade = {
-            "entry": ltp,
-            "sl": sl,
-            "target": target,
-            "active": True
-        }
-
-        send_telegram_alert(
-            f"✅ Order Placed: {TRADE_SYMBOL}\nQty: {QTY}\nEntry: {ltp}\nSL: {sl}\nTarget: {target}"
-        )
-        print(f"✅ Order ID: {order}")
-
-    except Exception as e:
-        print("🚨 Order Failed:", e)
-        send_telegram_alert(f"🚨 Order Failed: {e}")
-
-def check_exit_conditions(ltp):
-    global open_trade
-    if open_trade and open_trade["active"]:
-        sl = open_trade['sl']
-        target = open_trade['target']
-
-        if ltp <= sl:
-            exit_order("SL HIT ❌", ltp)
-        elif ltp >= target:
-            exit_order("Target HIT ✅", ltp)
-
-def exit_order(reason, exit_price):
-    global open_trade
-    try:
-        kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=TRADE_SYMBOL,
-            transaction_type=kite.TRANSACTION_TYPE_SELL,
-            quantity=QTY,
-            product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_MARKET
-        )
-        open_trade['active'] = False
-        send_telegram_alert(f"📤 Exit Trade: {TRADE_SYMBOL}\n{reason}\nExit Price: {exit_price}")
-        print(f"📤 Exited: {reason} at {exit_price}")
-    except Exception as e:
-        print("🚨 Exit Order Failed:", e)
-        send_telegram_alert(f"🚨 Exit Order Failed: {e}")
-
-def resample_to_3min(df):
-    df.set_index('timestamp', inplace=True)
-    df = df.resample('3min').agg({'ltp': ['first', 'max', 'min', 'last']})
-    df.columns = ['open', 'high', 'low', 'close']
-    df.dropna(inplace=True)
-    df.reset_index(inplace=True)
-    return df
-
-def calculate_signals(df):
-    df['ema'] = EMAIndicator(df['close'], 20).ema_indicator()
-    df['rsi'] = RSIIndicator(df['close'], 14).rsi()
-    latest = df.iloc[-1]
-
-    if latest['close'] > latest['ema'] and latest['rsi'] > 55:
-        return "BUY_CE"
-    elif latest['close'] < latest['ema'] and latest['rsi'] < 45:
-        return "BUY_PE"
-    else:
-        return None
-
+# WebSocket callbacks
 def on_ticks(ws, ticks):
-    global ohlc_data
+    global tick_data, option_ltp, active_trade, entry_price, stoploss, target
+
     for tick in ticks:
-        token = tick['instrument_token']
-        ltp = tick['last_price']
-        ts = dt.datetime.now().replace(second=0, microsecond=0)
+        if tick['instrument_token'] == INDEX_TOKEN:
+            now = datetime.now()
+            tick_data.append({"time": now, "price": tick['last_price']})
+        else:
+            option_ltp = tick['last_price']
+            
+            # Auto square-off logic
+            if active_trade:
+                now = datetime.now()
+                date_str = now.strftime("%Y-%m-%d")
+                time_str = now.strftime("%H:%M")
+                unrealized_profit = option_ltp - entry_price
 
-        # ✅ Check if any active trade needs exit
-        if token == OPTION_TOKEN:
-            check_exit_conditions(ltp)
+                if option_ltp <= stoploss:
+                    send_telegram(f"📤 *Exit Trade*: SL HIT ❌ at ₹{option_ltp}")
+                    log_trade(date_str, time_str, current_signal, trade_symbol, entry_price, option_ltp, '❌')
+                    active_trade = False
 
-        if token not in ohlc_data:
-            ohlc_data[token] = []
+                elif option_ltp >= target:
+                    send_telegram(f"📤 *Exit Trade*: Target HIT ✅ at ₹{option_ltp}")
+                    log_trade(date_str, time_str, current_signal, trade_symbol, entry_price, option_ltp, '✅')
+                    active_trade = False
 
-        ohlc_data[token].append({'timestamp': ts, 'ltp': ltp})
+                elif unrealized_profit >= TRAIL_TRIGGER:
+                    # Shift SL to lock-in profit
+                    new_sl = option_ltp - TRAIL_STEP
+                    if new_sl > stoploss:
+                        stoploss = new_sl
+                        print(f"🔁 Trailing SL moved up to ₹{stoploss}")
+                        send_telegram(f"🔁 *Trailing SL* updated to ₹{stoploss}")
 
-        if ts.minute % 3 == 0 and len(ohlc_data[token]) >= 10:
-            df = pd.DataFrame(ohlc_data[token])
-            ohlc = resample_to_3min(df)
-            signal = calculate_signals(ohlc)
-
-            print(f"\n📊 Token: {token} | Time: {ts.strftime('%H:%M')} | Signal: {signal}")
-            if signal and (not open_trade or not open_trade["active"]):
-                alert_msg = f"📈 {dt.datetime.now().strftime('%H:%M:%S')} - Signal: {signal}\n" \
-                             f"Instrument: {OPTION_TOKEN}\nTimeframe: 3-min\n" \
-                             f"Action: {'Buy Call Option' if signal == 'BUY_CE' else 'Buy Put Option'}"
-                send_telegram_alert(alert_msg)
-                place_option_trade(signal)
-
-            ohlc_data[token] = []
+def log_trade(date, time, signal, symbol, entry, exit_price, result):
+    pnl = round(exit_price - entry, 2)
+    row = [date, time, signal, symbol, entry, exit_price, result, pnl]
+    file_exists = os.path.isfile("trade_log.csv")
+    with open("trade_log.csv", "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        if not file_exists:
+            writer.writerow(["Date", "Time", "Signal", "Symbol", "Entry", "Exit", "Result", "PnL"])
+        writer.writerow(row)
 
 def on_connect(ws, response):
-    print("✅ WebSocket connected. Subscribing to tokens...")
+    print("✅ WebSocket connected")
     ws.subscribe(tokens)
     ws.set_mode(ws.MODE_LTP, tokens)
 
 def on_close(ws, code, reason):
-    print("🔌 WebSocket disconnected:", reason)
+    print("🔌 WebSocket closed", reason)
 
+# Resample 1-min candle
+def resample_to_1min(df):
+    df.set_index("time", inplace=True)
+    ohlc = df['price'].resample('1min').ohlc()
+    df.reset_index(inplace=True)
+    return ohlc.dropna()
+
+# Basic EMA-RSI strategy
+def check_signal(df):
+    df['ema'] = df['close'].ewm(span=9).mean()
+    df['rsi'] = compute_rsi(df['close'], 14)
+    last = df.iloc[-1]
+
+    if last['close'] > last['ema'] and last['rsi'] > 55:
+        return "BUY_CE"
+    elif last['close'] < last['ema'] and last['rsi'] < 45:
+        return "BUY_PE"
+    return None
+
+def compute_rsi(series, period):
+    delta = series.diff().dropna()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+# Trade execution logic
+def place_trade(signal):
+    global active_trade, entry_price, stoploss, target, option_ltp, tokens
+
+    # Get live NIFTY spot price
+    spot = kite.ltp("NSE:NIFTY 50")['NSE:NIFTY 50']['last_price']
+
+    # Get updated option token and symbol based on signal
+    option_token, trade_symbol = get_option_details(spot, signal, expiry)
+
+    if not option_token:
+        print("⚠️ Option token not found. Skipping trade.")
+        return
+
+    # Unsubscribe previous option tokens except NIFTY index
+    for t in tokens[:]:
+        if t != INDEX_TOKEN:
+            kws.unsubscribe([t])
+            tokens.remove(t)
+          
+    # Subscribe to the new CE/PE token
+    tokens.append(option_token)
+    kws.subscribe([option_token])
+    kws.set_mode(kws.MODE_LTP, [option_token])
+
+    # Wait 1 second for LTP to arrive
+    time.sleep(1)
+
+    if option_ltp is None or option_ltp == 0:
+        print("⚠️ LTP not available yet.")
+        return
+
+    # Set trade state
+    entry_price = option_ltp
+    stoploss = entry_price - SL_POINTS
+    target = entry_price + TARGET_POINTS
+    active_trade = True
+
+    # Telegram alert
+    send_telegram(
+        f"📥 *Entry Signal*: `{signal}` on `{trade_symbol}`\n"
+        f"💰 Entry: ₹{entry_price}\n"
+        f"🎯 Target: ₹{target}\n"
+        f"🛑 Stoploss: ₹{stoploss}"
+    )
+
+# Start WebSocket
+kws = KiteTicker(api_key, access_token)
 kws.on_ticks = on_ticks
 kws.on_connect = on_connect
 kws.on_close = on_close
-
 print("🔄 Connecting to Kite WebSocket...")
 kws.connect(threaded=True)
 
-# ✅ Keep the script alive
-import time
+# Main loop
 while True:
     try:
-        time.sleep(1)
+        if len(tick_data) >= 20:
+            df = pd.DataFrame(tick_data)
+            ohlc = resample_to_1min(df)
+            signal = check_signal(ohlc)
+
+            # ✅ Time-based guard
+            now = datetime.now()
+            if not (TRADING_START <= now.time() <= TRADING_END):
+                print("⏱ Outside trading hours, skipping...")
+                tick_data = []
+                time.sleep(10)
+                continue
+
+            # ✅ Cooldown check
+            if signal and not active_trade:
+                if last_trade_time and (now - last_trade_time).seconds < cooldown_minutes * 60:
+                    print(f"⏳ Cooldown active. Waiting...")
+                else:
+                    place_trade(signal)
+                    last_trade_time = now
+
+            tick_data = []  # Clear after signal
+        time.sleep(5)
+
     except KeyboardInterrupt:
-        print("🛑 Manual exit")
+        print("🛑 Exiting...")
         break
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+        time.sleep(5)  # Retry delay
