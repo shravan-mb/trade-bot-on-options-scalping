@@ -18,7 +18,7 @@ TRADING_END = dtime(15, 0)
 
 # Zerodha credentials
 api_key = "8u2wqiw1fiqfeo00"
-access_token = "MqLW7DjAgQp45IsC7xF9z22uWNuFY7N4"
+access_token = "EeaiwNaeIVHTclKobux8twD797caSZAT"
 kite = KiteConnect(api_key=api_key)
 kite.set_access_token(access_token)
 
@@ -34,6 +34,7 @@ active_trade = False
 entry_price = 0
 stoploss = 0
 target = 0
+trade_symbol = ""
 
 # Signal config
 SL_POINTS = 5
@@ -49,6 +50,9 @@ TRAIL_STEP = 2          # Move SL every 5 points gained
 expiry = get_nearest_expiry()
 chat_id = "6138982558"
 
+# Add at the top of your script
+LOT_SIZE = 1  # Nifty 50 lot size for CE/PE options
+
 # WebSocket callbacks
 def on_ticks(ws, ticks):
     global tick_data, option_ltp, active_trade, entry_price, stoploss, target
@@ -57,6 +61,7 @@ def on_ticks(ws, ticks):
         if tick['instrument_token'] == INDEX_TOKEN:
             now = datetime.now()
             tick_data.append({"time": now, "price": tick['last_price']})
+            # print(f"NIFTY Tick: {tick['last_price']}")  # 🔍 Add this line
         else:
             option_ltp = tick['last_price']
             
@@ -113,8 +118,10 @@ def resample_to_1min(df):
 # Basic EMA-RSI strategy
 def check_signal(df):
     df['ema'] = df['close'].ewm(span=9).mean()
-    df['rsi'] = compute_rsi(df['close'], 14)
+    df['rsi'] = compute_rsi(df['close'], 2)
     last = df.iloc[-1]
+
+    print(f"🔎 Close: {last['close']:.2f}, EMA: {last['ema']:.2f}, RSI: {last['rsi']:.2f}")
 
     if last['close'] > last['ema'] and last['rsi'] > 55:
         return "BUY_CE"
@@ -131,7 +138,7 @@ def compute_rsi(series, period):
 
 # Trade execution logic
 def place_trade(signal):
-    global active_trade, entry_price, stoploss, target, option_ltp, tokens
+    global active_trade, entry_price, stoploss, target, option_ltp, tokens, trade_symbol
 
     # Get live NIFTY spot price
     spot = kite.ltp("NSE:NIFTY 50")['NSE:NIFTY 50']['last_price']
@@ -160,20 +167,39 @@ def place_trade(signal):
     if option_ltp is None or option_ltp == 0:
         print("⚠️ LTP not available yet.")
         return
+    
+    try:
+        # ✅ Place BUY MARKET ORDER
+        order_id = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=kite.EXCHANGE_NFO,
+            tradingsymbol=trade_symbol,
+            transaction_type=kite.TRANSACTION_TYPE_BUY,
+            quantity=LOT_SIZE,
+            order_type=kite.ORDER_TYPE_MARKET,
+            product=kite.PRODUCT_MIS
+        )
 
-    # Set trade state
-    entry_price = option_ltp
-    stoploss = entry_price - SL_POINTS
-    target = entry_price + TARGET_POINTS
-    active_trade = True
+        # Set trade state
+        entry_price = option_ltp
+        stoploss = entry_price - SL_POINTS
+        target = entry_price + TARGET_POINTS
+        active_trade = True
 
-    # Telegram alert
-    send_telegram(
-        f"📥 *Entry Signal*: `{signal}` on `{trade_symbol}`\n"
-        f"💰 Entry: ₹{entry_price}\n"
-        f"🎯 Target: ₹{target}\n"
-        f"🛑 Stoploss: ₹{stoploss}"
-    )
+        # Telegram alert
+        send_telegram(
+            f"📥 *Order Placed*: `{signal}` on `{trade_symbol}`\n"
+            f"🆔 Order ID: {order_id}\n"
+            f"💰 Entry: ₹{entry_price}\n"
+            f"🎯 Target: ₹{target}\n"
+            f"🛑 Stoploss: ₹{stoploss}"
+        )
+
+        print(f"✅ Order placed successfully: {order_id}")
+
+    except Exception as e:
+        print(f"❌ Order placement failed: {e}")
+        send_telegram(f"❌ *Order Failed*: `{trade_symbol}`\nError: {e}")
 
 # Start WebSocket
 kws = KiteTicker(api_key, access_token)
@@ -189,6 +215,8 @@ while True:
         if len(tick_data) >= 20:
             df = pd.DataFrame(tick_data)
             ohlc = resample_to_1min(df)
+            print("🔍 1-Min Candle:")
+            print(ohlc.tail(2))  # Show last 2 candles for inspection
             signal = check_signal(ohlc)
 
             # ✅ Time-based guard

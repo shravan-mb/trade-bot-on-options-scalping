@@ -3,7 +3,7 @@ import pandas as pd
 
 # Replace with your credentials
 api_key = "8u2wqiw1fiqfeo00"
-access_token = "MqLW7DjAgQp45IsC7xF9z22uWNuFY7N4"
+access_token = "EeaiwNaeIVHTclKobux8twD797caSZAT"
 
 kite = KiteConnect(api_key=api_key)
 kite.set_access_token(access_token)

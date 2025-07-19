@@ -41,3 +41,18 @@ Checklist to Start Bot with Live Market
 - Telegram entry/exit alerts
 - Updates to trade_log.csv
 - TSL movement, if price goes in favor
+
+📊 Fully Automated Nifty Options Scalping Bot (Zerodha)
+
+This bot uses 1-minute live tick data from Zerodha WebSocket to dynamically trade NIFTY options (CE/PE) using a rule-based EMA+RSI strategy. It supports real-time CE/PE detection, dynamic expiry mapping, auto LTP tracking, trailing SL, Telegram alerts, and trade cooldown.
+
+✅ Features:
+
+- 1-min scalping logic
+- Live CE/PE token switching
+- 1:2 RR (5pt SL, 10pt target)
+- Trailing SL with lock-in
+- Telegram alerts & CSV log
+- Time and trade filter
+
+Future roadmap: RSI divergence, volume filter, S/R zone analysis, auto stop-trade logic.

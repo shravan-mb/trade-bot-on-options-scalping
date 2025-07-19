@@ -3,7 +3,7 @@ import datetime
 
 # ✅ Your Zerodha credentials
 api_key = "8u2wqiw1fiqfeo00"
-access_token = "oteZjmGK6hngEJ2Ndh1uDBH0Ni63ak7c"
+access_token = "EeaiwNaeIVHTclKobux8twD797caSZAT"
 
 # ✅ Instrument tokens
 # NIFTY 50 index = 256265
